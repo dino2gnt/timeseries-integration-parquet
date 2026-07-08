@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<features name="openmms-plugins-timeseries-parquet-plugin-features" xmlns="http://karaf.apache.org/xmlns/features/v1.4.0">
+
+    <feature name="opennms-plugins-timeseries-parquet-plugin" description="OpenNMS :: Plugins :: timeseries-parquet-plugin" version="${project.version}">
+        <feature dependency="true">aries-blueprint</feature>
+        <feature dependency="true">shell</feature>
+        <!-- pax-url-wrap URL handler: lets us install the non-OSGi jars below as bundles. -->
+        <feature dependency="true">wrap</feature>
+        <feature version="${opennms.api.version}" dependency="true">opennms-integration-api</feature>
+
+        <!--
+            Third-party stack. NONE of these jars ship an OSGi manifest (verified: no
+            Bundle-SymbolicName), so each is installed through the wrap: handler, following the
+            Cortex TSS plugin pattern (thin plugin bundle + one wrapped bundle per dependency,
+            NOT an Embed-Dependency uber-bundle).
+
+            The parquet and hadoop bundles are wrapped with Import-Package=*;resolution:=optional.
+            Rationale (DESIGN §9/§10): on the pure-JVM path this plugin actually exercises
+            (LocalInputFile/LocalOutputFile + PlainParquetConfiguration + UNCOMPRESSED), Hadoop's
+            heavy transitive tree (commons-configuration2, guava, jackson, woodstox, ...) is never
+            touched. Those jars are intentionally excluded from the build, so wrap must not turn
+            their byte-code references into mandatory imports or nothing would resolve. Marking the
+            imports optional lets the bundles resolve while the packages that ARE present in this
+            feature (the other parquet/hadoop bundles) are still wired normally.
+
+            re2j is self-contained (only java.*), so a plain wrap is enough and its
+            com.google.re2j export satisfies the plugin's mandatory import.
+        -->
+        <bundle>wrap:mvn:com.google.re2j/re2j/${re2j.version}</bundle>
+
+        <bundle>wrap:mvn:org.apache.hadoop/hadoop-common/${hadoop.version}$Import-Package=*;resolution:=optional</bundle>
+        <bundle>wrap:mvn:org.apache.hadoop/hadoop-mapreduce-client-core/${hadoop.version}$Import-Package=*;resolution:=optional</bundle>
+
+        <bundle>wrap:mvn:org.apache.parquet/parquet-format-structures/${parquet.version}$Import-Package=*;resolution:=optional</bundle>
+        <bundle>wrap:mvn:org.apache.parquet/parquet-common/${parquet.version}$Import-Package=*;resolution:=optional</bundle>
+        <bundle>wrap:mvn:org.apache.parquet/parquet-encoding/${parquet.version}$Import-Package=*;resolution:=optional</bundle>
+        <bundle>wrap:mvn:org.apache.parquet/parquet-column/${parquet.version}$Import-Package=*;resolution:=optional</bundle>
+        <bundle>wrap:mvn:org.apache.parquet/parquet-jackson/${parquet.version}$Import-Package=*;resolution:=optional</bundle>
+        <bundle>wrap:mvn:org.apache.parquet/parquet-hadoop/${parquet.version}$Import-Package=*;resolution:=optional</bundle>
+
+        <!-- Pure-Java LZ4 backing for parquet's LZ4_RAW codec (no OSGi manifest -> wrap). Exports
+             io.airlift.compress.*, which parquet-hadoop imports optionally; optional imports on the
+             wrap keep it resolvable (e.g. sun.misc.Unsafe comes via framework bootdelegation). -->
+        <bundle>wrap:mvn:io.airlift/aircompressor/${aircompressor.version}$Import-Package=*;resolution:=optional</bundle>
+
+        <!-- The plugin bundle itself. Its manifest mandatorily imports org.apache.parquet.* and
+             com.google.re2j, all exported by the wrapped bundles above. -->
+        <bundle>mvn:org.opennms.plugins.timeseries.parquet/parquet-tss-plugin/${project.version}</bundle>
+    </feature>
+
+</features>

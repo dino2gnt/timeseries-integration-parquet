@@ -1,0 +1,12 @@
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/AircompressorCodecFactory.java
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/Compactor.java
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/MetricCatalog.java
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/MetricCatalogStore.java
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/ParquetStorage.java
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/PathMapper.java
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/RetentionManager.java
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/SampleBuffer.java
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/SampleReader.java
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/SampleRow.java
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/SampleSchema.java
+/home/dino2gnt/src/timeseries-integration-parquet/plugin/src/main/java/org/opennms/timeseries/impl/parquet/SampleWriter.java

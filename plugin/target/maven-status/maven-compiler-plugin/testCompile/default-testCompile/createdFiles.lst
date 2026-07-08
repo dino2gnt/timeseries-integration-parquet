@@ -1,0 +1,11 @@
+org/opennms/timeseries/impl/parquet/CompactorTest.class
+org/opennms/timeseries/impl/parquet/ParquetStorageBufferTest.class
+org/opennms/timeseries/impl/parquet/ParquetStorageRestartTest.class
+org/opennms/timeseries/impl/parquet/MetricCatalogStoreTest.class
+org/opennms/timeseries/impl/parquet/MetricCatalogTest.class
+org/opennms/timeseries/impl/parquet/PathMapperTest.class
+org/opennms/timeseries/impl/parquet/ParquetStorageTest.class
+org/opennms/timeseries/impl/parquet/ParquetStorageConfigTest.class
+org/opennms/timeseries/impl/parquet/SampleBufferTest.class
+org/opennms/timeseries/impl/parquet/ParquetStorageCompressionTest.class
+org/opennms/timeseries/impl/parquet/RetentionManagerTest.class
