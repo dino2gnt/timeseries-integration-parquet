@@ -29,6 +29,7 @@
 package org.opennms.timeseries.impl.parquet;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
@@ -140,6 +141,10 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
 
     /** Shards where a metric was logically deleted; compaction purges their dead rows, then clears them. */
     private final Set<Path> shardsPendingPurge = ConcurrentHashMap.newKeySet();
+
+    /** Dropwizard metrics exported over JMX (see {@link ParquetMetrics}); registry lives for the
+     *  bean's lifetime, the JMX reporter is started in {@link #init()} and stopped in {@link #destroy()}. */
+    private final ParquetMetrics metrics = new ParquetMetrics();
 
     /** Built in {@link #init()} from {@link #baseDir} (or {@link #RRD_BASE_DIR_PROPERTY}). */
     private volatile PathMapper pathMapper;
@@ -262,6 +267,7 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
         pathMapper = new PathMapper(dir);
         sampleWriter = new SampleWriter(compression);
         sampleBuffer = new SampleBuffer(flushMaxRows);
+        metrics.start(); // publish JMX metrics under org.opennms.timeseries.impl.tss-parquet
         loadCatalog();
         startBufferFlush();
         startMaintenance();
@@ -310,6 +316,7 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
         shutdown(maintenanceExecutor);
         maintenanceExecutor = null;
         compactor = null; // so a post-shutdown compactNow() fails fast rather than racing
+        metrics.stop(); // unregister the JMX MBeans
         // Drain buffered samples and persist any pending catalog changes so a clean shutdown
         // loses nothing.
         if (pathMapper != null) {
@@ -357,7 +364,7 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
         // First run after one interval; a sweep is cheap enough not to warrant running at startup.
         maintenanceExecutor.scheduleWithFixedDelay(() -> {
             try {
-                retentionManager.sweep();
+                metrics.incPartitionsDeleted(retentionManager.sweep());
             } catch (final Exception e) {
                 log.warn("Retention sweep failed; will retry next interval.", e);
             }
@@ -373,10 +380,14 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
         }
     }
 
-    /** The scheduled-timer entry point: run a pass, swallow-and-log failures (retried next interval). */
+    /** The scheduled-timer entry point: run a pass, logging start/end, swallow-and-log failures. */
     private void runCompaction() {
+        final long startNanos = System.nanoTime();
+        log.info("Scheduled compaction starting.");
         try {
-            doCompaction();
+            final int modified = doCompaction();
+            log.info("Scheduled compaction finished: {} partition(s) modified in {} ms.",
+                    modified, (System.nanoTime() - startNanos) / 1_000_000L);
         } catch (final Exception e) {
             log.warn("Compaction failed; will retry next interval.", e);
         }
@@ -397,11 +408,15 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
         final Set<Path> toPurge = new HashSet<>(shardsPendingPurge);
         shardsPendingPurge.removeAll(toPurge);
         boolean ok = false;
+        // Time every pass (scheduled and manual) into the JMX compaction timer.
+        final com.codahale.metrics.Timer.Context timerContext = metrics.compactionTimer().time();
         try {
             final int modified = c.compact(toPurge);
             ok = true;
+            metrics.incPartitionsCompacted(modified);
             return modified;
         } finally {
+            timerContext.stop();
             if (!ok) {
                 shardsPendingPurge.addAll(toPurge); // retry the purge next pass
             }
@@ -459,10 +474,16 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
         if (rows == null || rows.isEmpty()) {
             return;
         }
+        // A write to a not-yet-existing partition dir creates it; count that as a new partition.
+        // (Approximate under concurrent first-writes to the same partition; fine for an ops gauge.)
+        final boolean newPartition = !Files.isDirectory(partitionDir);
         try {
             sampleWriter.write(partitionDir, rows);
         } catch (final IOException e) {
             throw new StorageException("Failed to write samples to " + partitionDir, e);
+        }
+        if (newPartition) {
+            metrics.incPartitionsCreated();
         }
     }
 
@@ -474,6 +495,7 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
         }
         final PathMapper paths = requireInitialized();
         final SampleBuffer buffer = sampleBuffer;
+        metrics.incSamplesWritten(samples.size());
 
         // Buffer each sample under its target partition (shard + time partition), indexing each
         // distinct metric in the catalog as we go. A parquet file is written only when a bucket
@@ -518,6 +540,7 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
             return 0;
         }
         final PathMapper paths = requireInitialized();
+        metrics.incSamplesWritten(samples.size());
 
         final Map<Path, List<SampleRow>> byPartition = new HashMap<>();
         for (final Sample sample : samples) {
@@ -541,6 +564,12 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
     public void flushCatalog() throws StorageException {
         requireInitialized();
         flushCatalogIfDirty();
+    }
+
+    /** The plugin's metric registry (also exported over JMX); used by the {@code tss-parquet:stats} command. */
+    @Override
+    public com.codahale.metrics.MetricRegistry metricRegistry() {
+        return metrics.registry();
     }
 
     @Override
@@ -577,6 +606,7 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
         } catch (final IOException e) {
             throw new StorageException("Failed to read samples for metric " + metric.getKey(), e);
         }
+        metrics.incSamplesRead(rows.size());
 
         final List<DataPoint> dataPoints = rows.stream()
                 .sorted(Comparator.comparing(SampleRow::time))

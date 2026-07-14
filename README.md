@@ -71,6 +71,24 @@ ConfigAdmin PID **`org.opennms.timeseries.parquet`** (e.g.
 > `IllegalArgumentException`: they would require that Hadoop codec path (and `SNAPPY`/`ZSTD`
 > are native besides). Leave it at `UNCOMPRESSED` or set `LZ4_RAW`.
 
+## Metrics (JMX)
+
+The plugin publishes operational metrics via a Dropwizard (Codahale) `MetricRegistry` exported over
+JMX under the domain **`org.opennms.timeseries.impl.tss-parquet`** (visible in JConsole/VisualVM or
+any JMX client while the bundle is active):
+
+| Metric | Type | Meaning |
+|--------|------|---------|
+| `compaction`          | Timer   | Duration of each compaction pass (scheduled and manual), with count + percentiles |
+| `samples.written`     | Counter | Total samples accepted by `store()` / `bulkImport()` |
+| `samples.read`        | Counter | Total sample rows read from disk to serve queries |
+| `partitions.created`  | Counter | Partition directories created by writes |
+| `partitions.deleted`  | Counter | Partition directories removed by the retention sweep |
+| `partitions.compacted`| Counter | Partitions modified by compaction |
+
+Each scheduled compaction also logs at INFO when it starts and finishes, including how many
+partitions it modified and how long it took.
+
 ## Build
 
 * Requires JDK 17–21 and Maven 3.6+. Build targets Java 17 bytecode.
@@ -82,9 +100,9 @@ ConfigAdmin PID **`org.opennms.timeseries.parquet`** (e.g.
 ## Packaging (fat bundle)
 
 The plugin is a **fat OSGi bundle**: the whole third-party stack is embedded inside it via bnd
-`Embed-Dependency`, rather than shipped as one wrapped bundle per jar. Embedded set (12 jars):
-`re2j`, `aircompressor`, `jts-core`, `jrobin` (for `import-from-rrd`),
-`parquet-{hadoop,column,encoding,format-structures,common,jackson}`,
+`Embed-Dependency`, rather than shipped as one wrapped bundle per jar. Embedded set (14 jars):
+`re2j`, `aircompressor`, `jts-core`, `jrobin` (for `import-from-rrd`), `metrics-core` + `metrics-jmx`
+(for the JMX metrics), `parquet-{hadoop,column,encoding,format-structures,common,jackson}`,
 `hadoop-{common,mapreduce-client-core}`. Only `org.opennms.integration.api.*`, `org.slf4j` and the
 karaf shell action API are mandatory imports; every reference into the excluded parts of the hadoop/parquet tree
 (commons-configuration2, guava, woodstox, `snappy-java`, `zstd-jni`, ...) is an optional import,
@@ -113,6 +131,9 @@ parquet 1.17's write path references `org.locationtech.jts` unconditionally. See
    `feature:install opennms-timeseries-parquet-plugin`
 
 ## Shell commands
+
+* `tss-parquet:stats` — prints the plugin's current metrics (compaction timer + sample/partition
+  counters — the same set exported over JMX) to the shell via a Dropwizard `ConsoleReporter`.
 
 * `tss-parquet:compact` — runs a compaction pass immediately instead of waiting for the scheduled
   `compaction.interval` timer (merges small part files, removes empty ones, and purges deleted

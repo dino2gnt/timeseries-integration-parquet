@@ -30,6 +30,7 @@ package org.opennms.timeseries.impl.parquet;
 
 import java.util.Collection;
 
+import com.codahale.metrics.MetricRegistry;
 import org.opennms.integration.api.v1.timeseries.Sample;
 import org.opennms.integration.api.v1.timeseries.StorageException;
 
@@ -62,4 +63,7 @@ public interface ParquetMaintenance {
 
     /** Persists any pending catalog (metric index) changes to the durable sidecar. Call once after a bulk import. */
     void flushCatalog() throws StorageException;
+
+    /** The plugin's Dropwizard metric registry, for reporters such as the {@code tss-parquet:stats} command. */
+    MetricRegistry metricRegistry();
 }

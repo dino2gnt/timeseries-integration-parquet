@@ -24,6 +24,8 @@
         <aircompressor.version>2.0.2</aircompressor.version>
         <!-- JRobin reader for the tss-parquet:import-from-rrd command (.jrb backfill). -->
         <jrobin.version>1.6.0</jrobin.version>
+        <!-- Dropwizard (Codahale) metrics + JMX reporter for the plugin's operational metrics. -->
+        <metrics.version>4.2.37</metrics.version>
         <mockito.version>2.18.0</mockito.version>
         <!-- Targeted OpenNMS Integration API version. Override to build for a different API, e.g.
              -Dopennms.api.version=1.6.1 ; the kar name carries this value so both can be built. -->

@@ -57,7 +57,7 @@
                             a classpath containing only the embedded set: without jts every write NCDFEs;
                             with it (and still without snappy/zstd/commons-pool) all pass.
                         -->
-                        <Embed-Dependency>re2j,aircompressor,parquet-hadoop,parquet-column,parquet-encoding,parquet-format-structures,parquet-common,parquet-jackson,jts-core,jrobin,hadoop-common,hadoop-mapreduce-client-core</Embed-Dependency>
+                        <Embed-Dependency>re2j,aircompressor,parquet-hadoop,parquet-column,parquet-encoding,parquet-format-structures,parquet-common,parquet-jackson,jts-core,jrobin,metrics-core,metrics-jmx,hadoop-common,hadoop-mapreduce-client-core</Embed-Dependency>
                         <Embed-Transitive>true</Embed-Transitive>
                         <!--
                             The embedded parquet/hadoop classes reference many packages we deliberately do
@@ -188,6 +188,19 @@
             <groupId>org.jrobin</groupId>
             <artifactId>jrobin</artifactId>
             <version>${jrobin.version}</version>
+        </dependency>
+        <!-- Dropwizard/Codahale metrics + JMX reporter for operational metrics (compaction timing,
+             sample/partition counters), exported under the org.opennms.timeseries.impl.tss-parquet
+             JMX domain. Both embedded in the fat bundle. -->
+        <dependency>
+            <groupId>io.dropwizard.metrics</groupId>
+            <artifactId>metrics-core</artifactId>
+            <version>${metrics.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.dropwizard.metrics</groupId>
+            <artifactId>metrics-jmx</artifactId>
+            <version>${metrics.version}</version>
         </dependency>
 
         <!-- Test -->
