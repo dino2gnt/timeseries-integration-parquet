@@ -1,1 +1,4 @@
 assembly/kar/target/*
+plugin/target/*
+.idea/
+*.class
