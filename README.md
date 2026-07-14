@@ -82,10 +82,11 @@ ConfigAdmin PID **`org.opennms.timeseries.parquet`** (e.g.
 ## Packaging (fat bundle)
 
 The plugin is a **fat OSGi bundle**: the whole third-party stack is embedded inside it via bnd
-`Embed-Dependency`, rather than shipped as one wrapped bundle per jar. Embedded set (11 jars):
-`re2j`, `aircompressor`, `jts-core`, `parquet-{hadoop,column,encoding,format-structures,common,jackson}`,
-`hadoop-{common,mapreduce-client-core}`. Only `org.opennms.integration.api.*` and `org.slf4j` are
-mandatory imports; every reference into the excluded parts of the hadoop/parquet tree
+`Embed-Dependency`, rather than shipped as one wrapped bundle per jar. Embedded set (12 jars):
+`re2j`, `aircompressor`, `jts-core`, `jrobin` (for `import-from-rrd`),
+`parquet-{hadoop,column,encoding,format-structures,common,jackson}`,
+`hadoop-{common,mapreduce-client-core}`. Only `org.opennms.integration.api.*`, `org.slf4j` and the
+karaf shell action API are mandatory imports; every reference into the excluded parts of the hadoop/parquet tree
 (commons-configuration2, guava, woodstox, `snappy-java`, `zstd-jni`, ...) is an optional import,
 since the pure-JVM UNCOMPRESSED/LZ4_RAW + local-file path never loads them.
 
@@ -109,7 +110,7 @@ parquet 1.17's write path references `org.locationtech.jts` unconditionally. See
    `echo "org.opennms.timeseries.strategy=integration" >> etc/opennms.properties.d/timeseries.properties`
 2. Copy the `.kar` from `./assembly/kar/target` to `$OPENNMS_HOME/deploy`.
 3. In the Karaf shell (`ssh -p 8101 admin@localhost`):
-   `feature:install opennms-plugins-timeseries-parquet-plugin`
+   `feature:install opennms-timeseries-parquet-plugin`
 
 ## Shell commands
 
@@ -118,6 +119,28 @@ parquet 1.17's write path references `org.locationtech.jts` unconditionally. See
   metrics' rows). It runs on the store's single maintenance thread, so it never races the scheduled
   sweep/compaction, and prints how many partitions were modified. Useful after a bulk delete or to
   force cleanup while validating a deployment.
+
+* `tss-parquet:import-from-rrd -s <rrd|jrb> --yes-really` — backfills the store from local RRDtool
+  (`.rrd`) or JRobin (`.jrb`) files under `rrd.base.dir`. Options: `-s/--storage-tool`
+  (`rrdtool|rrd|jrobin|jrb`, required), `-t/--threads` (default: CPUs), `-v/--verbose`,
+  `--yes-really` (required confirmation). It walks the `response` and `snmp` trees (honoring
+  `org.opennms.rrd.storeByGroup`) and reconstructs samples from the finest RRAs. It honors
+  `org.opennms.rrd.storeByForeignSource`: when **true**, store-by-id paths (`snmp/<nodeId>/…`) are
+  rewritten to store-by-foreign-source `resourceId`s (`snmp/fs/<fs>/<fid>/…`) via the OpenNMS node
+  table; when **false**, the on-disk path is used verbatim so imported `resourceId`s match what live
+  collection writes. (The node-table lookup is skipped entirely in the false case.)
+
+  **How it writes:** unlike live collection, an import knows each partition's full sample set up
+  front, so it uses a **direct bulk-write path** (`bulkImport`) that groups samples by
+  `(shard,partition)` and writes each partition as **one** file — bypassing the async buffer. For a
+  greenfield backfill that is the optimal layout with **no compaction needed**; if a partition
+  already holds live data the import adds one file that the scheduled compaction (or
+  `tss-parquet:compact`) later merges.
+
+  **Requirements:** `rrdtool` mode shells out to the `rrdtool` binary (set the `rrd.binary` system
+  property) and parses its `dump` XML via JAXB; `jrobin` mode reads `.jrb` via the embedded jrobin
+  library. The command also needs the OpenNMS `javax.sql.DataSource` service (for the node →
+  foreign-source mapping). It is an admin/one-shot tool — run it while collection is quiet.
 
 ## Karaf runtime status
 

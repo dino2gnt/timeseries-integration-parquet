@@ -57,7 +57,7 @@
                             a classpath containing only the embedded set: without jts every write NCDFEs;
                             with it (and still without snappy/zstd/commons-pool) all pass.
                         -->
-                        <Embed-Dependency>re2j,aircompressor,parquet-hadoop,parquet-column,parquet-encoding,parquet-format-structures,parquet-common,parquet-jackson,jts-core,hadoop-common,hadoop-mapreduce-client-core</Embed-Dependency>
+                        <Embed-Dependency>re2j,aircompressor,parquet-hadoop,parquet-column,parquet-encoding,parquet-format-structures,parquet-common,parquet-jackson,jts-core,jrobin,hadoop-common,hadoop-mapreduce-client-core</Embed-Dependency>
                         <Embed-Transitive>true</Embed-Transitive>
                         <!--
                             The embedded parquet/hadoop classes reference many packages we deliberately do
@@ -180,6 +180,14 @@
             <groupId>io.airlift</groupId>
             <artifactId>aircompressor</artifactId>
             <version>${aircompressor.version}</version>
+        </dependency>
+        <!-- JRobin: reads legacy .jrb files for tss-parquet:import-from-rrd. Pure-Java, no
+             transitives; embedded in the fat bundle. RRDtool .rrd is read by shelling out to the
+             `rrdtool dump` binary (no jar needed), only its XML is parsed via JAXB. -->
+        <dependency>
+            <groupId>org.jrobin</groupId>
+            <artifactId>jrobin</artifactId>
+            <version>${jrobin.version}</version>
         </dependency>
 
         <!-- Test -->

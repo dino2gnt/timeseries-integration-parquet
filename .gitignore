@@ -1,4 +1,5 @@
 assembly/kar/target/*
 plugin/target/*
+karaf-features/target/*
 .idea/
 *.class

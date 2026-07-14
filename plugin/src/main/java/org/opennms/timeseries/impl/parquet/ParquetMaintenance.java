@@ -28,12 +28,15 @@
 
 package org.opennms.timeseries.impl.parquet;
 
+import java.util.Collection;
+
+import org.opennms.integration.api.v1.timeseries.Sample;
 import org.opennms.integration.api.v1.timeseries.StorageException;
 
 /**
  * Operator-facing maintenance hooks for the parquet store, exposed as an OSGi service so the Karaf
- * shell commands (e.g. {@code tss-parquet:compact}) can drive them on demand rather than waiting for
- * the scheduled background timers.
+ * shell commands (e.g. {@code tss-parquet:compact}, {@code tss-parquet:import-from-rrd}) can drive
+ * them on demand rather than waiting for the scheduled background timers.
  */
 public interface ParquetMaintenance {
 
@@ -45,4 +48,18 @@ public interface ParquetMaintenance {
      * @throws StorageException if the store is not initialized or the pass failed
      */
     int compactNow() throws StorageException;
+
+    /**
+     * Bulk-imports samples, grouping by {@code (shard,partition)} and writing each partition's rows
+     * as one file, bypassing the async write buffer. Ideal for a one-shot historical backfill (e.g.
+     * from RRD/JRB): new partitions get a single file needing no compaction, while partitions that
+     * already hold data gain one file a later compaction pass consolidates. Metrics are indexed in
+     * memory; call {@link #flushCatalog()} once when the whole import is done to persist them.
+     *
+     * @return the number of partition files written
+     */
+    int bulkImport(Collection<Sample> samples) throws StorageException;
+
+    /** Persists any pending catalog (metric index) changes to the durable sidecar. Call once after a bulk import. */
+    void flushCatalog() throws StorageException;
 }

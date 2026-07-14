@@ -33,8 +33,10 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -495,6 +497,49 @@ public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
 
         // Persist the catalog only if this batch introduced a new metric (or changed one's
         // meta/external tags); the common all-known-metrics case leaves it clean and skips I/O.
+        flushCatalogIfDirty();
+    }
+
+    /**
+     * Bulk-imports samples (the {@code tss-parquet:import-from-rrd} command), bypassing the async
+     * buffer. Rows are grouped by {@code (shard,partition)} and each partition's rows are written as
+     * ONE parquet file. For a greenfield historical backfill that yields the optimal
+     * one-file-per-partition layout with no compaction; a partition that already holds live data
+     * simply gains one more file, which a later compaction pass consolidates. Each distinct metric is
+     * indexed in the catalog, but the durable sidecar is left for a single {@link #flushCatalog()} at
+     * the end of the import so a per-resource import loop doesn't rewrite the whole sidecar each call.
+     *
+     * @return the number of partition files written
+     */
+    @Override
+    public int bulkImport(final Collection<Sample> samples) throws StorageException {
+        Objects.requireNonNull(samples, "samples");
+        if (samples.isEmpty()) {
+            return 0;
+        }
+        final PathMapper paths = requireInitialized();
+
+        final Map<Path, List<SampleRow>> byPartition = new HashMap<>();
+        for (final Sample sample : samples) {
+            final Metric metric = sample.getMetric();
+            catalog.put(metric);
+            final Path partitionDir = paths.partitionDir(resourceId(metric), sample.getTime(), partitionDuration);
+            byPartition.computeIfAbsent(partitionDir, k -> new ArrayList<>())
+                    .add(new SampleRow(sample.getTime(), name(metric), sample.getValue()));
+        }
+
+        int partitionsWritten = 0;
+        for (final Map.Entry<Path, List<SampleRow>> entry : byPartition.entrySet()) {
+            writeBucket(entry.getKey(), entry.getValue());
+            partitionsWritten++;
+        }
+        return partitionsWritten;
+    }
+
+    /** Persists any pending catalog (metric index) changes to the durable sidecar; call once after a bulk import. */
+    @Override
+    public void flushCatalog() throws StorageException {
+        requireInitialized();
         flushCatalogIfDirty();
     }
 

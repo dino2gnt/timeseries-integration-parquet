@@ -129,6 +129,72 @@ public class ParquetStorageMaintenanceTest {
         assertEquals("no rows lost in the manual compaction", 6, readCount());
     }
 
+    private int partFileCountAt(final Instant when) throws Exception {
+        final Path partitionDir = new PathMapper(tempFolder.getRoot().toPath())
+                .partitionDir(RESOURCE_ID, when, Duration.ofDays(1));
+        if (!Files.isDirectory(partitionDir)) {
+            return 0;
+        }
+        int count = 0;
+        try (DirectoryStream<Path> files = Files.newDirectoryStream(partitionDir,
+                SampleWriter.PART_FILE_PREFIX + "*" + SampleWriter.PART_FILE_SUFFIX)) {
+            for (final Path ignored : files) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    @Test
+    public void bulkImportWritesOneFilePerPartitionWithNoCompactionNeeded() throws Exception {
+        storage = newStorage();
+        // Samples spanning two daily partitions (07-06 and 07-07) for one metric.
+        final List<Sample> imported = new ArrayList<>();
+        imported.addAll(samples(0, 3));                              // 07-06T12:00:0x
+        final Instant nextDay = NOW.plus(Duration.ofDays(1));
+        for (int i = 0; i < 4; i++) {
+            imported.add(ImmutableSample.builder().metric(METRIC)
+                    .time(nextDay.plusSeconds(i)).value((double) (100 + i)).build());
+        }
+
+        final int filesWritten = storage.bulkImport(imported);
+        storage.flushCatalog();
+
+        assertEquals("one file written per (shard,partition)", 2, filesWritten);
+        assertEquals("day 1 partition has exactly one file (no append, no compaction)", 1, partFileCountAt(NOW));
+        assertEquals("day 2 partition has exactly one file", 1, partFileCountAt(nextDay));
+    }
+
+    @Test
+    public void bulkImportedSamplesAreReadableAndMetricIsCatalogued() throws Exception {
+        storage = newStorage();
+        storage.bulkImport(samples(0, 5));
+        storage.flushCatalog();
+
+        assertEquals("all bulk-imported samples are readable", 5, readCount());
+        assertEquals("the imported metric is findable via the catalog", 1,
+                storage.findMetrics(java.util.List.of(
+                        org.opennms.integration.api.v1.timeseries.immutables.ImmutableTagMatcher.builder()
+                                .type(org.opennms.integration.api.v1.timeseries.TagMatcher.Type.EQUALS)
+                                .key("name").value("ifHCInOctets").build())).size());
+    }
+
+    @Test
+    public void bulkImportIntoAnExistingPartitionAppendsThenCompactionMerges() throws Exception {
+        storage = newStorage();
+        // First import creates the partition (one file); a second import of the same partition adds
+        // a second file (the documented append fallback), which compaction then consolidates.
+        storage.bulkImport(samples(0, 3));
+        storage.bulkImport(samples(3, 3));
+        storage.flushCatalog();
+        assertEquals("second import appended a file", 2, partFileCountAt(NOW));
+
+        storage.compactNow();
+
+        assertEquals("compaction merged the appended files", 1, partFileCountAt(NOW));
+        assertEquals("no rows lost across import + compaction", 6, readCount());
+    }
+
     @Test
     public void compactNowFailsCleanlyAfterDestroy() throws Exception {
         storage = newStorage();

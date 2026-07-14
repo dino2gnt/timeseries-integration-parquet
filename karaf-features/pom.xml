@@ -83,7 +83,7 @@
                                 <feature>framework</feature>
                             </framework>
                             <features>
-                                <feature>opennms-plugins-timeseries-parquet-plugin</feature>
+                                <feature>opennms-timeseries-parquet-plugin</feature>
                             </features>
                         </configuration>
                     </execution>

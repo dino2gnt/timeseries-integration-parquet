@@ -164,7 +164,7 @@ instructive because **`karaf:verify` — static OBR resolution — catches none 
    (`ColumnChunkPageWriteStore` → `GeospatialStatistics.noopBuilder` →
    `org.locationtech.jts.io.ParseException`), geometry column or not. It must be embedded.
 
-**Embedded set (11 jars):** `re2j`, `aircompressor`, `jts-core`,
+**Embedded set (12 jars):** `re2j`, `aircompressor`, `jts-core`, `jrobin`,
 `parquet-{hadoop,column,encoding,format-structures,common,jackson}`,
 `hadoop-{common,mapreduce-client-core}`. Hadoop's heavy transitive tree
 (commons-configuration2, guava, jackson, woodstox, ...) and parquet's native codecs
@@ -201,7 +201,7 @@ the missing `jts-core`.
    metric's rows within a shared group file is deferred — logical deletes age out via retention.)
 5. ✅ Config wiring (ConfigAdmin PID `org.opennms.timeseries.parquet`).
 6. ✅ Karaf packaging: **fat plugin bundle** — the third-party stack (parquet ×6, hadoop ×2,
-   re2j, aircompressor, jts-core = 11 jars) is embedded via `Embed-Dependency`; excluded
+   re2j, aircompressor, jts-core, jrobin = 12 jars) is embedded via `Embed-Dependency`; excluded
    references are optional imports (§10). `karaf:verify` resolves the feature and a
    self-contained `.kar` is produced. ✅ **Live-OpenNMS smoke test passed** (Horizon 37): the
    blueprint bean instantiates and the plugin persists data. (Original plan was a thin bundle +
