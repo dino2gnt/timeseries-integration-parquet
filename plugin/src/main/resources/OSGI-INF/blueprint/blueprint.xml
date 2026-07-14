@@ -51,4 +51,6 @@
             <entry key="registration.export" value="true" />
         </service-properties>
     </service>
+    <!-- Same bean, exposed as ParquetMaintenance so the tss-parquet:* shell commands can drive it. -->
+    <service ref="timeSeriesStorageParquet" interface="org.opennms.timeseries.impl.parquet.ParquetMaintenance" />
 </blueprint>

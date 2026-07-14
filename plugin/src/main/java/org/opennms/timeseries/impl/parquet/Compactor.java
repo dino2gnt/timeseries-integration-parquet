@@ -118,37 +118,68 @@ class Compactor {
                 if (compactPartition(partitionDir, purge, liveNamesByShard.getOrDefault(shardDir, Set.of()))) {
                     compacted++;
                 }
-            } catch (final IOException e) {
-                // A single bad partition shouldn't abort the whole pass; it retries next run.
+            } catch (final RuntimeException | IOException e) {
+                // A single bad partition shouldn't abort the whole pass; it retries next run. Catch
+                // RuntimeException too: parquet's reader throws unchecked (e.g. "not a Parquet file")
+                // on a corrupt file, which must not escape and kill compaction of every other shard.
                 log.warn("Failed to compact partition {}; skipping.", partitionDir, e);
             }
         }
         return compacted;
     }
 
-    /** @return true if the partition was rewritten */
+    /** @return true if the partition was modified (empty files removed and/or files merged) */
     private boolean compactPartition(final Path partitionDir, final boolean purge,
                                      final Set<String> liveNames) throws IOException {
-        final List<Path> originals = listPartFiles(partitionDir);
-        if (originals.size() < minFiles && !purge) {
-            return false; // not enough to merge and nothing to purge here
+        // Drop 0-byte part files outright: with atomic writes a 0-byte part-*.parquet can only be a
+        // crashed/interrupted or pre-atomic-write leftover and holds no rows. Removing them here both
+        // heals the on-disk mess and stops a bad file from failing the read below.
+        int removedEmpty = 0;
+        final List<Path> realFiles = new ArrayList<>();
+        for (final Path file : listPartFiles(partitionDir)) {
+            if (Files.size(file) == 0) {
+                Files.deleteIfExists(file);
+                removedEmpty++;
+            } else {
+                realFiles.add(file);
+            }
         }
-        if (originals.isEmpty()) {
-            return false;
+        if (removedEmpty > 0) {
+            log.warn("Removed {} empty parquet part file(s) in {}.", removedEmpty, partitionDir);
         }
 
         final List<SampleRow> merged = new ArrayList<>();
-        for (final Path file : originals) {
-            for (final SampleRow row : sampleReader.readAllRows(file)) {
+        final List<Path> readFiles = new ArrayList<>();
+        for (final Path file : realFiles) {
+            final List<SampleRow> rows;
+            try {
+                rows = sampleReader.readAllRows(file);
+            } catch (final RuntimeException | IOException e) {
+                // A corrupt, non-empty file can't be proven empty, so we neither merge nor delete it;
+                // skip it (leaving it in place, flagged again next pass) so the readable files still
+                // compact instead of the whole partition erroring out.
+                log.warn("Skipping unreadable parquet file {} during compaction.", file, e);
+                continue;
+            }
+            for (final SampleRow row : rows) {
                 if (!purge || liveNames.contains(row.name())) {
                     merged.add(row);
                 }
             }
+            readFiles.add(file);
+        }
+
+        // Only rewrite when it's worth it: a real merge (>= minFiles readable files) or a purge that
+        // actually has something to rewrite. Otherwise we'd churn a lone good file next to a skipped
+        // corrupt one on every pass.
+        final boolean worthRewriting = purge ? !readFiles.isEmpty() : readFiles.size() >= minFiles;
+        if (!worthRewriting) {
+            return removedEmpty > 0;
         }
 
         if (merged.isEmpty()) {
-            // Everything here was purged (or the files were empty): drop the files outright.
-            for (final Path file : originals) {
+            // Everything we could read was purged: drop exactly the files we read.
+            for (final Path file : readFiles) {
                 Files.deleteIfExists(file);
             }
             return true;
@@ -156,10 +187,10 @@ class Compactor {
 
         // Write the merged rows to a temp file (invisible to the part-* read glob), then swap:
         // delete exactly the files we read, then publish the temp. A file the flusher wrote after
-        // we snapshotted `originals` is left untouched.
+        // we snapshotted `realFiles` (and any skipped corrupt file) is left untouched.
         final Path temp = partitionDir.resolve(COMPACT_TEMP_PREFIX + java.util.UUID.randomUUID() + COMPACT_TEMP_SUFFIX);
         sampleWriter.writeTo(temp, merged);
-        for (final Path file : originals) {
+        for (final Path file : readFiles) {
             Files.deleteIfExists(file);
         }
         moveIntoPlace(temp, SampleWriter.newPartFile(partitionDir));

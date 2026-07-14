@@ -17,14 +17,20 @@ See [`DESIGN.md`](DESIGN.md) for the full design and rationale.
 * **Files** — samples are buffered in memory per partition and flushed to a new immutable
   `part-<uuid>.parquet` on a row threshold, a timer, or shutdown (schema: `time` INT64
   epoch-micros, `name` UTF8, `value` DOUBLE). Append = add a file, so writes never rewrite
-  existing data. Buffered-but-unflushed samples are readable only after a flush (a small
-  staleness window) and are lost on an unclean crash.
+  existing data. Each file is written to a hidden temp and **atomically moved** into place, so
+  readers and compaction only ever see complete files — never a half-written or 0-byte one.
+  Buffered-but-unflushed samples are readable only after a flush (a small staleness window) and
+  are lost on an unclean crash.
 * **Compaction** — frequent flushing keeps memory and the crash window small but yields one file
   per collection cycle per shard (hundreds of tiny files/shard/day, which Parquet reads poorly).
   A periodic background pass merges each partition's small files into one larger file and, for
   shards where a metric was deleted, drops the deleted metric's rows (the physical purge). This is
   the usual columnar *flush-small / compact-later* split; tuning `flush.interval` alone can't fix
-  small files because collection is bursty (one burst per period).
+  small files because collection is bursty (one burst per period). Compaction is resilient to a
+  bad file: a 0-byte part file (a crash leftover from before atomic writes) is removed, an
+  unreadable/corrupt one is skipped and left in place with a warning, and either way the rest of
+  the pass proceeds instead of aborting. Run a pass on demand with the `tss-parquet:compact`
+  shell command (below).
 * **Catalog** — an in-memory index of the full metric definitions backs `findMetrics` (regex/
   equality over intrinsic + meta tags) and resolves the complete metric for reads.
 * **Retention** — a scheduled sweep deletes whole partition directories older than the
@@ -35,8 +41,8 @@ See [`DESIGN.md`](DESIGN.md) for the full design and rationale.
 
 | Module           | Purpose                                                                       |
 |------------------|-------------------------------------------------------------------------------|
-| `plugin`         | `ParquetStorage` + `PathMapper`, `MetricCatalog`, `SampleWriter/Reader`, `RetentionManager`, blueprint |
-| `karaf-features` | The Karaf `features.xml` (plugin bundle + wrapped parquet/hadoop/re2j bundles) |
+| `plugin`         | `ParquetStorage` + `PathMapper`, `MetricCatalog`, `SampleWriter/Reader`, `RetentionManager`, blueprint. Built as a **fat bundle** that embeds the whole parquet/hadoop stack (see Packaging) |
+| `karaf-features` | The Karaf `features.xml` (just the fat plugin bundle + feature deps)          |
 | `assembly/kar`   | Packages everything into a deployable, self-contained `.kar`                  |
 
 ## Configuration
@@ -71,7 +77,31 @@ ConfigAdmin PID **`org.opennms.timeseries.parquet`** (e.g.
 * `mvn install` — runs unit + contract tests and statically verifies the Karaf feature resolves
   (`karaf:verify`). For a fully offline build, add `-Dkaraf.verify.skip=true`.
 * Deployable archive: `./assembly/kar/target/opennms-timeseries-parquet-plugin-opa-v2.0.0.kar`
-  (self-contained: embeds the wrapped parquet/hadoop/re2j jars).
+  (self-contained: the single fat plugin bundle, which itself embeds the parquet/hadoop/re2j/etc jars).
+
+## Packaging (fat bundle)
+
+The plugin is a **fat OSGi bundle**: the whole third-party stack is embedded inside it via bnd
+`Embed-Dependency`, rather than shipped as one wrapped bundle per jar. Embedded set (11 jars):
+`re2j`, `aircompressor`, `jts-core`, `parquet-{hadoop,column,encoding,format-structures,common,jackson}`,
+`hadoop-{common,mapreduce-client-core}`. Only `org.opennms.integration.api.*` and `org.slf4j` are
+mandatory imports; every reference into the excluded parts of the hadoop/parquet tree
+(commons-configuration2, guava, woodstox, `snappy-java`, `zstd-jni`, ...) is an optional import,
+since the pure-JVM UNCOMPRESSED/LZ4_RAW + local-file path never loads them.
+
+This is deliberate. The `org.apache.parquet` package is **split** across `parquet-common`,
+`parquet-column` and `parquet-hadoop`; shipping those as separate bundles makes OSGi wire that one
+package to a single exporter, so e.g. `parquet-column` can't see `parquet-common`'s `Preconditions`
+→ `NoClassDefFoundError` at runtime (which `karaf:verify` does **not** catch). Embedding puts all
+parquet classes on one classloader and dissolves the split. Two related gotchas the fat bundle also
+settles: no `Karaf-Commands` header (it would make Karaf scan/`defineClass` every embedded class and
+choke on the excluded refs + multi-release-jar entries), and `jts-core` must be embedded because
+parquet 1.17's write path references `org.locationtech.jts` unconditionally. See `DESIGN.md` §10.
+
+> **Verifying the shipped set:** a green `mvn test` does not prove the bundle ships enough — the
+> Maven test classpath still contains excluded transitives. Extract the jars embedded in the built
+> bundle and run the runtime-path tests against only those + slf4j + integration-api. That models
+> the OSGi classpath (and is what caught the missing `jts-core`).
 
 ## Install into OpenNMS
 
@@ -81,23 +111,33 @@ ConfigAdmin PID **`org.opennms.timeseries.parquet`** (e.g.
 3. In the Karaf shell (`ssh -p 8101 admin@localhost`):
    `feature:install opennms-plugins-timeseries-parquet-plugin`
 
-## Karaf smoke test — still required
+## Shell commands
 
-The build proves the feature **resolves** (OSGi wiring: the plugin bundle's parquet/re2j imports
-are satisfied by the wrapped bundles, and Hadoop's heavy transitives are marked optional because
-the local-file path never exercises them). It does **not** prove runtime behaviour. Before
-trusting this in production, smoke-test on a real OpenNMS/Karaf:
+* `tss-parquet:compact` — runs a compaction pass immediately instead of waiting for the scheduled
+  `compaction.interval` timer (merges small part files, removes empty ones, and purges deleted
+  metrics' rows). It runs on the store's single maintenance thread, so it never races the scheduled
+  sweep/compaction, and prints how many partitions were modified. Useful after a bulk delete or to
+  force cleanup while validating a deployment.
 
-1. `feature:install` the feature and confirm every bundle reaches **Active** (`bundle:list`),
-   especially the wrapped `hadoop-common`, `hadoop-mapreduce-client-core` and `parquet-*`.
+## Karaf runtime status
+
+Confirmed working on a live OpenNMS **Horizon 37** instance: the feature installs, the plugin
+bundle reaches **Active**, the `ParquetStorage` blueprint bean instantiates, and the plugin
+persists data. (`karaf:verify` only proves the feature *resolves*; the runtime issues that had to
+be fixed — split package, the `Karaf-Commands` scan, the missing `jts-core` — are exactly the class
+of problem static resolution can't see. See `DESIGN.md` §10.)
+
+Checklist to re-run when validating a new build or a new OpenNMS version:
+
+1. `feature:install` the feature and confirm the plugin bundle reaches **Active** (`bundle:list`).
 2. Confirm the `ParquetStorage` service is registered (`service:list TimeSeriesStorage`) and the
    blueprint container is created (`bundle:services`, no `GracePeriod`).
 3. Let OpenNMS collect data, then verify `part-*.parquet` files appear under `<baseDir>/data/…`
-   and that graphs render (read path works end-to-end inside Karaf).
-4. Watch the log for `NoClassDefFoundError`/`ClassNotFoundException` (an over-aggressive optional
-   import) and for split-package mis-wiring across the parquet bundles — the two risks static
-   resolution can't rule out. If a `ServiceLoader`/TCCL failure appears, add Aries SPI-Fly
-   (not in Karaf's standard features; must be bundled).
+   **and that graphs render** (exercises the read + `findMetrics` path end-to-end).
+4. Watch the log through at least one `compaction.interval`/`retention.sweep.interval` so the
+   background maintenance passes run against real on-disk data. Any `NoClassDefFoundError` there
+   means a genuinely-needed jar is missing from the embedded set (re-run the shipped-set check
+   above); it is no longer a split-package/wiring symptom.
 
 ## Links
 * Time Series Storage Layer: https://docs.opennms.com/horizon/latest/operation/operation/timeseries/introduction.html

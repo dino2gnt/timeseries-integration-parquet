@@ -158,6 +158,85 @@ public class CompactorTest {
         assertEquals("all part files gone", 0, partFileCount());
     }
 
+    /** Manually drops a file matching the part-*.parquet glob into the partition. */
+    private Path plantPartFile(final byte[] contents) throws IOException {
+        Files.createDirectories(partitionDir);
+        final Path f = partitionDir.resolve(
+                SampleWriter.PART_FILE_PREFIX + java.util.UUID.randomUUID() + SampleWriter.PART_FILE_SUFFIX);
+        Files.write(f, contents);
+        return f;
+    }
+
+    @Test
+    public void compactionRemovesZeroByteFilesAndStillMergesTheRest() throws Exception {
+        // The production bug: a 0-byte part file (crash/interrupted-write leftover) used to make the
+        // whole pass throw "not a Parquet file". It must be removed and the good files still merged.
+        catalogMetric("ifHCInOctets");
+        writeOneRowFile("ifHCInOctets", 1);
+        writeOneRowFile("ifHCInOctets", 2);
+        final Path empty = plantPartFile(new byte[0]);
+        assertEquals(3, partFileCount());
+
+        final int compacted = compactor.compact(Set.of());
+
+        assertEquals(1, compacted);
+        assertFalse("the 0-byte file was removed", Files.exists(empty));
+        assertEquals("good files merged into one", 1, partFileCount());
+        assertEquals("no real rows lost", 2, readAllRows().size());
+    }
+
+    @Test
+    public void lonelyZeroByteFileIsCleanedEvenBelowMergeThreshold() throws Exception {
+        // A single 0-byte file (below minFiles, no purge) must still be swept, not left to re-warn.
+        final Path empty = plantPartFile(new byte[0]);
+        assertEquals(1, partFileCount());
+
+        compactor.compact(Set.of());
+
+        assertFalse(Files.exists(empty));
+        assertEquals(0, partFileCount());
+    }
+
+    @Test
+    public void corruptFileIsSkippedNotFatalAndGoodFilesStillCompact() throws Exception {
+        catalogMetric("ifHCInOctets");
+        writeOneRowFile("ifHCInOctets", 1);
+        writeOneRowFile("ifHCInOctets", 2);
+        final Path corrupt = plantPartFile("not a parquet file".getBytes());
+
+        // Must not throw; the two good files merge, the corrupt one is left in place for a human.
+        final int compacted = compactor.compact(Set.of());
+
+        assertEquals(1, compacted);
+        assertTrue("corrupt file left in place", Files.exists(corrupt));
+        // Read via the resilient query path (which skips the corrupt file) to confirm no real loss.
+        assertEquals("2 good rows preserved", 2,
+                reader.read(pathMapper.shardDir(RESOURCE_ID), "ifHCInOctets", T0, T0.plusSeconds(60)).size());
+    }
+
+    @Test
+    public void readSkipsAZeroByteFileInsteadOfThrowing() throws Exception {
+        writeOneRowFile("ifHCInOctets", 1);
+        plantPartFile(new byte[0]);
+
+        final List<SampleRow> rows = reader.read(pathMapper.shardDir(RESOURCE_ID),
+                "ifHCInOctets", T0, T0.plusSeconds(60));
+
+        assertEquals("the one real sample is returned, the empty file skipped", 1, rows.size());
+    }
+
+    @Test
+    public void writeLeavesNoTempFileAndExactlyOnePartFile() throws Exception {
+        writeOneRowFile("ifHCInOctets", 1);
+
+        assertEquals(1, partFileCount());
+        try (DirectoryStream<Path> all = Files.newDirectoryStream(partitionDir)) {
+            for (final Path p : all) {
+                assertFalse("no leftover temp: " + p, p.getFileName().toString().endsWith(SampleWriter.TEMP_SUFFIX));
+            }
+        }
+    }
+
     @Test
     public void concurrentlyWrittenFileIsNotLostByCompaction() throws Exception {
         // Simulate: compaction snapshots two files, then the flusher writes a third mid-pass.

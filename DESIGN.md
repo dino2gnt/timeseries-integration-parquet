@@ -131,14 +131,60 @@ Whole-directory deletion is cheap and safe (self-contained files).
   `catalog/` trees live under it, mirroring where RRD/Newts data already lands. Fail fast in
   `init()` if the property is unset and no explicit `baseDir` is configured.
 
-## 10. Packaging risk (biggest unknown) — de-risk early
-parquet-java still **link-requires `hadoop-common`** even with local files, and Hadoop jars
-ship no OSGi manifests. The OpenNMS Cortex TSS plugin's proven pattern: thin plugin bundle,
-one `mvn:` bundle per dependency in `features.xml`, `wrap:` non-OSGi jars, and a shade module
-only for colliding libs — **not** an Embed-Dependency uber-bundle. Likely also need Aries
-**SPI-Fly** for ServiceLoader/TCCL. **Milestone 0.5: a Karaf spike** — deploy a trivial
-bundle that news up a `ParquetWriter(LocalOutputFile)` and writes a temp file inside a
-running Karaf, to prove the dependency set resolves before building the whole plugin.
+## 10. Packaging — fat (Embed-Dependency) bundle
+parquet-java still **link-requires `hadoop-common`** even with local files, and none of the
+parquet/hadoop jars ship OSGi manifests. We package the whole third-party stack **inside the
+plugin bundle** via bnd `Embed-Dependency` (a single fat bundle), *not* one wrapped bundle per
+jar. This reverses the original plan (which followed the Cortex "thin bundle + `wrap:` per dep"
+pattern). Three separate failures on the live-OpenNMS smoke test forced the change; each is
+instructive because **`karaf:verify` — static OBR resolution — catches none of them**:
+
+1. **Split package.** `org.apache.parquet` is split across three jars: `parquet-common` (has
+   `Preconditions`, `Closeables`, ...), `parquet-column` (`CorruptStatistics`, ...) and
+   `parquet-hadoop` (`HadoopReadOptions`, ...). With one wrapped bundle per jar, OSGi wires that
+   one package to a **single** exporter, so `parquet-column` can't see `parquet-common`'s
+   `Preconditions` → `NoClassDefFoundError` at blueprint bean init. OBR "resolves" because a
+   provider for the package exists; it never checks class-level completeness. Embedding puts every
+   `org.apache.parquet.*` class on one `Bundle-ClassPath`, so the split package becomes an ordinary
+   classpath and the problem dissolves.
+
+2. **`Karaf-Commands` must be package-scoped, never `*`.** The skel template set
+   `Karaf-Commands: *`. Karaf's `CommandExtension` lists `<path>/*.class` for each header clause and
+   `defineClass`es them hunting for `@Command`; with `*` that is **every** class in the bundle. In a
+   fat bundle it force-loads all of hadoop/parquet — including classes that reference
+   deliberately-excluded deps (hadoop's shaded protobuf/guava, hadoop-auth, commons-configuration2,
+   avro, ...) and multi-release-jar `META-INF/versions/*` + `module-info` entries — a storm of
+   `NoClassDefFoundError`/"wrong name"/`ACC_MODULE` failures. The fix is to scope the header to the
+   command subpackage only: `Karaf-Commands: org.opennms.timeseries.impl.parquet.shell`, which holds
+   just the command classes (e.g. `CompactCommand`), so the scan never touches the embedded jars. A
+   fat bundle *can* host shell commands — just never with `Karaf-Commands: *`.
+
+3. **`jts-core` is a mandatory runtime dep of the WRITE path.** Parquet 1.17 references
+   `org.locationtech.jts` unconditionally when constructing a writer
+   (`ColumnChunkPageWriteStore` → `GeospatialStatistics.noopBuilder` →
+   `org.locationtech.jts.io.ParseException`), geometry column or not. It must be embedded.
+
+**Embedded set (11 jars):** `re2j`, `aircompressor`, `jts-core`,
+`parquet-{hadoop,column,encoding,format-structures,common,jackson}`,
+`hadoop-{common,mapreduce-client-core}`. Hadoop's heavy transitive tree
+(commons-configuration2, guava, jackson, woodstox, ...) and parquet's native codecs
+(`snappy-java`, `zstd-jni`) and `commons-pool` are **excluded** — never touched on the pure-JVM
+UNCOMPRESSED/LZ4_RAW + local-file path. bnd computes `Import-Package` from the embedded
+byte-code, so all those excluded references are marked `resolution:=optional`; only
+`org.opennms.integration.api.*` and `org.slf4j` stay mandatory (fail fast if the container
+lacks them). Multi-release jars (e.g. `parquet-jackson`) load their **base** classes from the
+jar root under Felix's `Bundle-ClassPath` — the `META-INF/versions/*` overrides are ignored,
+which is harmless. Aries **SPI-Fly** is *not* needed on this path (no codec/Configuration
+ServiceLoader is triggered).
+
+**Verifying the shipped set (do this before any packaging change):** a green `mvn test` does
+**not** prove the bundle ships enough — the Maven test classpath still contains excluded
+transitives (`jts`, `snappy`, `zstd`, `commons-pool`). Instead, extract the jars actually
+embedded in the built bundle and run the runtime-path tests (`ParquetStorageTest`,
+`ParquetStorageCompressionTest`, `CompactorTest`, `ParquetStorageRestartTest`,
+`ParquetStorageConfigTest`) against a classpath of **only** those + container-provided deps
+(slf4j, integration-api) + the JUnit harness. That models the OSGi classpath and is what caught
+the missing `jts-core`.
 
 ## 11. Testing
 - Unit-test PathMapper (resourceId→dir, both layouts + sanitization) and MetricCatalog
@@ -154,9 +200,12 @@ running Karaf, to prove the dependency set resolves before building the whole pl
 4. ✅ Retention sweep + logical delete. (Row-level physical purge of a logically-deleted
    metric's rows within a shared group file is deferred — logical deletes age out via retention.)
 5. ✅ Config wiring (ConfigAdmin PID `org.opennms.timeseries.parquet`).
-6. ✅ Karaf packaging: thin plugin bundle + one wrapped bundle per non-OSGi dependency
-   (parquet ×6, hadoop ×2, re2j), Hadoop imports marked optional. `karaf:verify` resolves the
-   feature; a self-contained `.kar` is produced. ⏳ Live-OpenNMS smoke test still pending (README).
+6. ✅ Karaf packaging: **fat plugin bundle** — the third-party stack (parquet ×6, hadoop ×2,
+   re2j, aircompressor, jts-core = 11 jars) is embedded via `Embed-Dependency`; excluded
+   references are optional imports (§10). `karaf:verify` resolves the feature and a
+   self-contained `.kar` is produced. ✅ **Live-OpenNMS smoke test passed** (Horizon 37): the
+   blueprint bean instantiates and the plugin persists data. (Original plan was a thin bundle +
+   `wrap:` per dep; abandoned — see §10 for the three runtime failures that forced the fat bundle.)
 
 Post-plan, done:
 - Durable catalog sidecar (`catalog/metrics.parquet`, loaded on `init()`, flushed on metric-set

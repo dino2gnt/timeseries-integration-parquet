@@ -29,8 +29,10 @@
 package org.opennms.timeseries.impl.parquet;
 
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Collection;
 import java.util.UUID;
 
@@ -58,6 +60,9 @@ class SampleWriter {
 
     static final String PART_FILE_PREFIX = "part-";
     static final String PART_FILE_SUFFIX = ".parquet";
+    /** Hidden temp for an in-progress write; leading dot + {@code .tmp} keeps it out of the part glob. */
+    static final String TEMP_PREFIX = ".";
+    static final String TEMP_SUFFIX = ".tmp";
 
     private final CompressionCodecName compression;
 
@@ -73,12 +78,28 @@ class SampleWriter {
      * Writes every {@code (time, name, value)} row for the given samples to a fresh parquet file
      * in {@code partitionDir}, creating the directory (and its parents) if necessary.
      *
+     * <p>The write is atomic from a reader's point of view: rows are written to a hidden temp file
+     * that does <em>not</em> match the {@code part-*.parquet} glob, then atomically moved into place.
+     * Readers and the compactor only ever enumerate {@code part-*.parquet}, so they never observe a
+     * half-written or 0-byte file. A crash mid-write leaves only the temp (invisible to those globs
+     * and cleaned up on the next successful pass), never a broken {@code part-*.parquet}.</p>
+     *
      * @return the path of the file that was written
      */
     Path write(final Path partitionDir, final Collection<SampleRow> rows) throws IOException {
         Files.createDirectories(partitionDir);
         final Path file = newPartFile(partitionDir);
-        writeTo(file, rows);
+        final Path temp = partitionDir.resolve(TEMP_PREFIX + file.getFileName() + TEMP_SUFFIX);
+        try {
+            writeTo(temp, rows);
+            try {
+                Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE);
+            } catch (final AtomicMoveNotSupportedException e) {
+                Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temp); // no-op once the move has succeeded
+        }
         return file;
     }
 

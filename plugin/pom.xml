@@ -18,9 +18,60 @@
                 <extensions>true</extensions>
                 <configuration>
                     <instructions>
-                        <Karaf-Commands>*</Karaf-Commands>
+                        <!--
+                            Karaf-Commands is scoped to the shell subpackage ONLY - never `*`. Karaf's
+                            CommandExtension lists `<path>/*.class` for each header clause and inspects
+                            those classes. `Karaf-Commands: *` would enumerate and defineClass EVERY class
+                            in this fat bundle (all of embedded hadoop/parquet), force-loading classes that
+                            reference deliberately-excluded deps (hadoop-shaded-protobuf/guava, hadoop-auth,
+                            commons-configuration2, avro) and multi-release-jar META-INF/versions/* +
+                            module-info entries - a storm of NoClassDefFoundError/"wrong name"/ACC_MODULE at
+                            deploy. Naming only the shell package limits the scan to our command classes.
+                        -->
+                        <Karaf-Commands>org.opennms.timeseries.impl.parquet.shell</Karaf-Commands>
                         <!-- Nothing to export -->
                         <Export-Package></Export-Package>
+                        <!--
+                            Fat bundle: embed the whole third-party stack instead of shipping one
+                            wrapped bundle per jar. This is REQUIRED, not an optimization: the
+                            `org.apache.parquet` package is split across parquet-common (Preconditions,
+                            ...), parquet-column (CorruptStatistics, ...) and parquet-hadoop
+                            (HadoopReadOptions, ...). With separate bundles, OSGi package-wiring wires
+                            that one package to a single exporter, so e.g. parquet-column cannot see
+                            parquet-common's Preconditions -> NoClassDefFoundError at runtime (karaf:verify
+                            does NOT catch this; it only checks a provider exists, not class completeness).
+                            Embedding puts every org.apache.parquet.* class on one Bundle-ClassPath, so the
+                            split package is just an ordinary classpath and the problem disappears.
+
+                            Embed the curated runtime set: the parquet family, the two hadoop jars
+                            (their transitives are excluded in the <dependencies> below), aircompressor,
+                            re2j, and jts-core. Embed-Transitive makes the parquet-* transitives (pulled
+                            via parquet-hadoop) embeddable; the explicit artifactId list keeps native/unused
+                            transitives (snappy-java, zstd-jni, commons-pool, javax.annotation-api) OUT.
+
+                            jts-core IS required (not optional): parquet 1.17 references
+                            org.locationtech.jts on the WRITE path unconditionally -
+                            ColumnChunkPageWriteStore -> GeospatialStatistics.noopBuilder touches
+                            org.locationtech.jts.io.ParseException on every writer construction, geometry
+                            column or not. Verified by running the store/read/compact/restart tests against
+                            a classpath containing only the embedded set: without jts every write NCDFEs;
+                            with it (and still without snappy/zstd/commons-pool) all pass.
+                        -->
+                        <Embed-Dependency>re2j,aircompressor,parquet-hadoop,parquet-column,parquet-encoding,parquet-format-structures,parquet-common,parquet-jackson,jts-core,hadoop-common,hadoop-mapreduce-client-core</Embed-Dependency>
+                        <Embed-Transitive>true</Embed-Transitive>
+                        <!--
+                            The embedded parquet/hadoop classes reference many packages we deliberately do
+                            NOT ship (snappy, zstd, hadoop's commons-*/woodstox/guava tree, ...). On the
+                            pure-JVM path this plugin exercises they are never loaded, so make every
+                            computed import optional and keep mandatory only what the plugin genuinely needs
+                            from the container (the integration API and slf4j) so a broken deploy fails fast.
+                        -->
+                        <!-- org.slf4j only (the logger API); org.slf4j.impl/spi/helpers are binding
+                             internals referenced by embedded jars and must stay optional, so they fall
+                             through to the *;optional catch-all below. The karaf shell action API is
+                             mandatory: the tss-parquet:compact command can't work without it, and the
+                             `shell` feature (a feature dependency) always provides it. -->
+                        <Import-Package>org.opennms.integration.api.*,org.slf4j,org.apache.karaf.shell.api.action,org.apache.karaf.shell.api.action.lifecycle,*;resolution:=optional</Import-Package>
                     </instructions>
                 </configuration>
             </plugin>
@@ -67,6 +118,15 @@
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <!-- Karaf shell action API for the tss-parquet:* commands. Provided by the container's
+             `shell` feature at runtime (a features.xml dependency), so scope=provided: compiled and
+             imported, never embedded. -->
+        <dependency>
+            <groupId>org.apache.karaf.shell</groupId>
+            <artifactId>org.apache.karaf.shell.core</artifactId>
+            <version>${karaf.version}</version>
+            <scope>provided</scope>
         </dependency>
         <!-- RE2 regex engine for tag-matcher searches (RE2 syntax, matching the OpenNMS TSS
              contract and the reference InMemoryStorage). Ships an OSGi manifest. -->

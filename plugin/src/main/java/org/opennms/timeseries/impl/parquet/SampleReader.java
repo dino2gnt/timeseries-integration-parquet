@@ -45,6 +45,9 @@ import org.apache.parquet.hadoop.example.GroupReadSupport;
 import org.apache.parquet.io.InputFile;
 import org.apache.parquet.io.LocalInputFile;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 /**
  * Reads samples for a single datasource {@code name} out of a shard directory, filtering by time
  * range.
@@ -62,6 +65,8 @@ import org.apache.parquet.io.LocalInputFile;
  * (the {@code read(InputFile)} factory leaves it null).</p>
  */
 class SampleReader {
+
+    private static final Logger LOG = LoggerFactory.getLogger(SampleReader.class);
 
     /**
      * @param shardDir the shard directory for a resourceId (may not exist yet)
@@ -92,8 +97,22 @@ class SampleReader {
         final String glob = SampleWriter.PART_FILE_PREFIX + "*" + SampleWriter.PART_FILE_SUFFIX;
         try (DirectoryStream<Path> files = Files.newDirectoryStream(partitionDir, glob)) {
             for (final Path file : files) {
-                if (Files.isRegularFile(file)) {
+                if (!Files.isRegularFile(file)) {
+                    continue;
+                }
+                if (Files.size(file) == 0) {
+                    // A 0-byte part file is a crash/interrupted-write leftover with no rows. Skip it
+                    // rather than let parquet throw "not a Parquet file" and fail the whole query;
+                    // compaction removes these.
+                    LOG.warn("Skipping empty parquet part file {}.", file);
+                    continue;
+                }
+                try {
                     readFile(file, name, start, end, out);
+                } catch (final RuntimeException e) {
+                    // One corrupt file must not blank out every graph for this resource. Skip it and
+                    // keep reading the rest of the shard.
+                    LOG.warn("Skipping unreadable parquet part file {}.", file, e);
                 }
             }
         }

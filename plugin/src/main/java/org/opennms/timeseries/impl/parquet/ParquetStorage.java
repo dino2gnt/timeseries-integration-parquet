@@ -42,6 +42,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -80,7 +81,7 @@ import org.slf4j.LoggerFactory;
  * persistence (rebuild on restart), retention, logical-delete physical purge and configuration
  * wiring arrive in later milestones.</p>
  */
-public class ParquetStorage implements TimeSeriesStorage {
+public class ParquetStorage implements TimeSeriesStorage, ParquetMaintenance {
 
     private static final Logger log = LoggerFactory.getLogger(ParquetStorage.class);
 
@@ -150,6 +151,9 @@ public class ParquetStorage implements TimeSeriesStorage {
      */
     private ScheduledExecutorService maintenanceExecutor;
     private ScheduledExecutorService flushExecutor;
+    /** Built in {@link #startMaintenance()} whether or not scheduled compaction is enabled, so the
+     *  manual {@code tss-parquet:compact} command can always run a pass. */
+    private volatile Compactor compactor;
 
     /** No-arg constructor for the OSGi blueprint; configuration arrives via setters before {@link #init()}. */
     public ParquetStorage() {
@@ -303,6 +307,7 @@ public class ParquetStorage implements TimeSeriesStorage {
         flushExecutor = null;
         shutdown(maintenanceExecutor);
         maintenanceExecutor = null;
+        compactor = null; // so a post-shutdown compactNow() fails fast rather than racing
         // Drain buffered samples and persist any pending catalog changes so a clean shutdown
         // loses nothing.
         if (pathMapper != null) {
@@ -356,26 +361,72 @@ public class ParquetStorage implements TimeSeriesStorage {
             }
         }, sweepSeconds, sweepSeconds, TimeUnit.SECONDS);
 
+        // Build the compactor unconditionally so the manual tss-parquet:compact command works even
+        // when scheduled compaction is disabled; only the timer is gated on compactionEnabled.
+        compactor = new Compactor(pathMapper, catalog, sampleReader, sampleWriter, COMPACTION_MIN_FILES);
         if (compactionEnabled) {
-            final Compactor compactor = new Compactor(
-                    pathMapper, catalog, sampleReader, sampleWriter, COMPACTION_MIN_FILES);
             final long compactSeconds = Math.max(1L, compactionInterval.getSeconds());
-            maintenanceExecutor.scheduleWithFixedDelay(() -> runCompaction(compactor),
+            maintenanceExecutor.scheduleWithFixedDelay(this::runCompaction,
                     compactSeconds, compactSeconds, TimeUnit.SECONDS);
         }
     }
 
-    private void runCompaction(final Compactor compactor) {
-        // Snapshot and clear the pending-purge shards up front; a delete arriving mid-run re-flags
-        // its shard for the next pass rather than being dropped here.
+    /** The scheduled-timer entry point: run a pass, swallow-and-log failures (retried next interval). */
+    private void runCompaction() {
+        try {
+            doCompaction();
+        } catch (final Exception e) {
+            log.warn("Compaction failed; will retry next interval.", e);
+        }
+    }
+
+    /**
+     * One compaction pass. Snapshots and clears the pending-purge shards up front (a delete arriving
+     * mid-run re-flags its shard for the next pass rather than being dropped); on failure the purge
+     * set is restored so it is retried. Must run on {@link #maintenanceExecutor} so passes serialize.
+     *
+     * @return the number of partitions modified
+     */
+    private int doCompaction() throws IOException {
+        final Compactor c = compactor;
+        if (c == null) {
+            return 0;
+        }
         final Set<Path> toPurge = new HashSet<>(shardsPendingPurge);
         shardsPendingPurge.removeAll(toPurge);
+        boolean ok = false;
         try {
-            compactor.compact(toPurge);
-        } catch (final Exception e) {
-            // Re-flag so the purge is retried next run; merges are naturally retried anyway.
-            shardsPendingPurge.addAll(toPurge);
-            log.warn("Compaction failed; will retry next interval.", e);
+            final int modified = c.compact(toPurge);
+            ok = true;
+            return modified;
+        } finally {
+            if (!ok) {
+                shardsPendingPurge.addAll(toPurge); // retry the purge next pass
+            }
+        }
+    }
+
+    /**
+     * Runs a compaction pass on demand (the {@code tss-parquet:compact} shell command). The pass is
+     * submitted to the single maintenance thread and awaited, so a manual run never races the
+     * scheduled sweep/compaction.
+     */
+    @Override
+    public int compactNow() throws StorageException {
+        final ScheduledExecutorService exec = maintenanceExecutor;
+        if (exec == null || compactor == null) {
+            throw new StorageException("Compaction is unavailable: storage is not initialized.");
+        }
+        try {
+            return exec.submit(this::doCompaction).get();
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new StorageException("Manual compaction was interrupted.", e);
+        } catch (final ExecutionException e) {
+            final Throwable cause = e.getCause();
+            throw new StorageException("Manual compaction failed.", cause != null ? cause : e);
+        } catch (final java.util.concurrent.RejectedExecutionException e) {
+            throw new StorageException("Compaction is unavailable: storage is shutting down.", e);
         }
     }
 
